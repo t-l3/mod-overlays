@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# Help message
+help_message() {
+  echo "# mod-overlays";
+  echo "
+Mod overlays is a bash script that makes use of linux filesystem overlays to merge the contents of multiple mod folders into one directory, and overlays it onto a game directory to effectively install mods without altering the original game files.
+
+A directory called mods.t-l3 is required (created by the script on first run) which can contain any number of mod directories. Each mod directory should mirror the interanal structure of the game directory.
+
+SYNTAX: mod-overlays [COMMAND]
+
+Logs for mod-overlays are written to mods.t-l3/mod-overlays.log
+
+";
+}
+
+if [[ "$1" == "--help" ]]; then
+  help_message;
+  exit 0;
+fi
+
+# Prepare variables
+MODS_MERGE_DIR="$(pwd).t-l3"
+MOD_DIRS=( $(cd mods.t-l3; ls -d */ | grep -vE '^(tmp|runtime|README)/$') )
+RUN_COMMAND=( "$@" )
+
+# Create directories
+mkdir -p "$MODS_MERGE_DIR" mods.t-l3/README mods.t-l3/runtime mods.t-l3/tmp
+help_message > mods.t-l3/README/README.t-l3.txt
+
+# Init logging
+LOGFILE="mods.t-l3/mod-overlays.log"
+echo "Starting mod-overlay at $(date "+%Y-%m-%d %H:%M:%S")" | tee $LOGFILE
+writelog() { ( cat; echo ) | tee -a $LOGFILE; }
+
+echo "Detected (${#MOD_DIRS[@]}) MOD_DIRS: ${MOD_DIRS[@]}" | writelog
+
+## TODO Populate README.t-l3.txt with help information and handle --help flags
+
+if [ "${#MOD_DIRS[@]}" -lt 1 ]; then
+  echo 'See `mod-overlays --help` or README.t-l3.txt for more information';
+  echo 'Running command without overlays' | writelog
+  bash -c "$( echo ${RUN_COMMAND[@]@Q} )" | writelog
+  exit 0;
+fi
+
+LOWER_DIRS=""
+
+for i in "${MOD_DIRS[@]}"; do
+  LOWER_DIRS+=":mods.t-l3/${i:0:-1}";
+done
+
+LOWER_DIRS="${LOWER_DIRS:1}"
+
+echo 'Running command with overlays' | writelog
+
+echo "Mount options:
+mount -t overlay -o lowerdir='$MODS_MERGE_DIR':'$LOWER_DIRS' overlay '$MODS_MERGE_DIR'
+mount -t overlay -o userxattr,index=off,xino=off,lowerdir='$(pwd)':'$MODS_MERGE_DIR',upperdir=mods.t-l3/runtime,workdir=mods.t-l3/tmp overlay '$(pwd)'" | writelog
+
+unshare --mount --map-root-user bash -c \
+"mount -t overlay -o \
+lowerdir='$MODS_MERGE_DIR':'$LOWER_DIRS' \
+overlay '$MODS_MERGE_DIR';
+
+MERGE_MOUNT_STATUS=\$?
+if [ \$MERGE_MOUNT_STATUS -ne 0 ]; then
+  echo;
+  echo 'Failed to mount mods (Exited '\$MERGE_MOUNT_STATUS') to the merge directory (\$MODS_MERGE_DIR)';
+  echo 'Refer to dmesg or journalctl -f -t kernel for details';
+  exit \$MERGE_MOUNT_STATUS;
+fi
+
+mount -t overlay -o userxattr,index=off,xino=off,\
+lowerdir='$(pwd)':'$MODS_MERGE_DIR',\
+upperdir=mods.t-l3/runtime,\
+workdir=mods.t-l3/tmp \
+overlay '$(pwd)';
+
+OVERLAY_MOUNT_STATUS=\$?
+
+if [ \$OVERLAY_MOUNT_STATUS -ne 0 ]; then
+  echo;
+  echo 'Failed to overlay merge directory (Exited '\$OVERLAY_MOUNT_STATUS') to working directory ($(pwd))';
+  echo 'Refer to dmesg or journalctl -f -t kernel for details';
+  exit \$OVERLAY_MOUNT_STATUS;
+fi
+
+# cd to the new overlay filesystem and run arguments as command
+cd '$(pwd)';
+bash -c \"$( echo ${RUN_COMMAND[@]@Q} )\"" 2>&1 | writelog
+
+rm -rf $MODS_MERGE_DIR
+echo "Terminated mod-overlay at $(date "+%Y-%m-%d %H:%M:%S")" | writelog
