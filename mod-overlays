@@ -21,6 +21,7 @@ if [[ "$1" == "--help" ]]; then
 fi
 
 # Prepare variables
+MOUNT_DIR="$(pwd)"
 MODS_MERGE_DIR="$(pwd).t-l3"
 MOD_DIRS=( $(cd mods.t-l3; ls -d */ | grep -vE '^(tmp|runtime|README)/$') )
 RUN_COMMAND=( "$@" )
@@ -59,7 +60,17 @@ echo "Mount options:
 mount -t overlay -o lowerdir='$MODS_MERGE_DIR':'$LOWER_DIRS' overlay '$MODS_MERGE_DIR'
 mount -t overlay -o userxattr,index=off,xino=off,lowerdir='$(pwd)':'$MODS_MERGE_DIR',upperdir=mods.t-l3/runtime,workdir=mods.t-l3/tmp overlay '$(pwd)'" | writelog
 
-unshare --mount --map-root-user bash -c \
+sudo -n echo "Root access available"
+ROOT_AVAILABLE="$?"
+PRIVILEDGE_ESCALATION_METHOD="unshare --mount --map-root-user"
+
+if [ $ROOT_AVAILABLE -eq 0 ]; then
+  PRIVILEDGE_ESCALATION_METHOD="sudo"
+fi
+
+echo "Using priviledge escalation method: '$PRIVILEDGE_ESCALATION_METHOD'"
+
+( $PRIVILEDGE_ESCALATION_METHOD bash -c \
 "mount -t overlay -o \
 lowerdir='$MODS_MERGE_DIR':'$LOWER_DIRS' \
 overlay '$MODS_MERGE_DIR';
@@ -87,9 +98,20 @@ if [ \$OVERLAY_MOUNT_STATUS -ne 0 ]; then
   exit \$OVERLAY_MOUNT_STATUS;
 fi
 
-# cd to the new overlay filesystem and run arguments as command
-cd '$(pwd)';
-bash -c \"$( echo ${RUN_COMMAND[@]@Q} )\"" 2>&1 | writelog
+if [ $ROOT_AVAILABLE -ne 0 ]; then
+  # cd to the new overlay filesystem and run arguments as command
+  cd '$(pwd)';
+  bash -c \"$( echo ${RUN_COMMAND[@]@Q} )\"
+fi" 
+
+if [ $ROOT_AVAILABLE -eq 0 ]; then
+  # cd to the new overlay filesystem and run arguments as command
+  cd "$(pwd)";
+  bash -c "$( echo ${RUN_COMMAND[@]@Q} )"
+  echo "Removing the mounts mod-overlays created"
+  cd /;
+  sudo bash -c "umount '$MOUNT_DIR' ; umount '$MODS_MERGE_DIR'"
+fi ) 2>&1 | writelog
 
 rm -rf $MODS_MERGE_DIR
 echo "Terminated mod-overlay at $(date "+%Y-%m-%d %H:%M:%S")" | writelog
